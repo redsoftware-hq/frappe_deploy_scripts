@@ -1,0 +1,43 @@
+name: Deploy Frappe App
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to deploy'
+        required: true
+        default: 'main'
+      commit_id:
+        description: 'Commit ID (optional, for rollback or specific deployment)'
+        required: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Fetch Branches and Validate Selection
+      run: |
+        echo "Fetching branches..."
+        BRANCHES=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+        "https://api.github.com/repos/${{ github.repository }}/branches" \
+        | jq -r '.[].name')
+
+        echo "Available branches: $BRANCHES"
+        if [[ ! " ${BRANCHES[@]} " =~ " ${{ inputs.branch }} " ]]; then
+          echo "Error: Selected branch '${{ inputs.branch }}' does not exist."
+          exit 1
+        fi
+
+    - name: Deploy to Server
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.SERVER_IP }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_KEY }}
+        script: |
+          cd /home/frappe/ci_cd
+          ./deploy.sh target_app ${{ inputs.branch }} ${{ inputs.commit_id }}
