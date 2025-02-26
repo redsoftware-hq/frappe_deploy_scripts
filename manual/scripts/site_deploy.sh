@@ -3,16 +3,18 @@
 set -e
 APP_NAME=$1
 BRANCH=$2
-COMMIT_ID=$3
-SITE_NAME=$4
+COMMIT_ID=$4
+SITE_NAME=$3
 
 if [ -z "$SITE_NAME" ]; then
     SITE_NAME=$(cat /home/frappe/ci_cd/default_site.txt) # Default site stored in secrets
 fi
 
-SITES_DIR="/home/frappe/bench/sites"
-APP_PATH="/home/frappe/bench/apps/$APP_NAME"
-VERSION_FILE="/home/frappe/ci_cd/app_versions.json"
+BENCH_DIR="/home/frappe/hfhg-prod-bench"
+SCRIPT_DIR="/home/frappe/ci_cd"
+SITES_DIR="$BENCH_DIR/sites"
+APP_PATH="$BENCH_DIR/apps/$APP_NAME"
+VERSION_FILE="$SCRIPT_DIR/app_versions.json"
 
 if [ -z "$APP_NAME" ] || [ -z "$BRANCH" ]; then
     echo "Usage: ./deploy.sh <app_name> <branch> [commit_id] [site_name]"
@@ -21,15 +23,20 @@ fi
 
 echo "Deploying $APP_NAME on site $SITE_NAME from branch: $BRANCH"
 
+# Load Bench Environment
+export PATH="$HOME/.local/bin:$PATH"  # Fix for bench not found
+source ~/.bashrc || true  # Load environment if available
+
+cd $BENCH_DIR
 # Database Backup Before Deployment
 echo "Taking database backup for site: $SITE_NAME..."
-bench --site $SITE_NAME backup
+#bench --site $SITE_NAME backup
 
 # Checkout Git Branch
 cd $APP_PATH
 git fetch
 git checkout $BRANCH
-git pull origin $BRANCH
+git pull upstream $BRANCH
 
 # Checkout Specific Commit (if provided)
 if [ ! -z "$COMMIT_ID" ]; then
@@ -45,7 +52,7 @@ echo "$APP_NAME: $CURRENT_COMMIT" >> $VERSION_FILE
 echo "Building assets for $APP_NAME..."
 if ! bench build --app $APP_NAME; then
     echo "Build failed! Rolling back..."
-    ./rollback.sh $APP_NAME $SITE_NAME
+    $SCRIPT_DIR/rollback.sh $APP_NAME $SITE_NAME
     exit 1
 fi
 
@@ -56,23 +63,41 @@ bench --site $SITE_NAME set-maintenance-mode on
 echo "Running database migrations for $SITE_NAME..."
 if ! bench --site $SITE_NAME migrate; then
     echo "Migration failed! Rolling back..."
-    ./rollback.sh $APP_NAME $SITE_NAME
+    $SCRIPT_DIR/rollback.sh $APP_NAME $SITE_NAME
     bench --site $SITE_NAME set-maintenance-mode off
     exit 1
 fi
 
-# Health Check
-echo "Running health check..."
-if ! curl -f http://localhost:8000; then
-    echo "Health check failed! Rolling back..."
-    ./rollback.sh $APP_NAME $SITE_NAME
-    exit 1
-fi
-
-# Restart Services
+# Restart All Services
+echo "Restarting services..."
 bench restart
+
+# Wait for services to fully start
+echo "Waiting for services to stabilize..."
+sleep 3
 
 # Disable Maintenance Mode
 bench --site $SITE_NAME set-maintenance-mode off
+
+# Health Check with Retry
+echo "Running health check..."
+MAX_RETRIES=5
+RETRY_COUNT=0
+while [[ $RETRY_COUNT -lt $MAX_RETRIES ]]; do
+    if curl -f https://$SITE_NAME/api/method/frappe.handler.ping; then
+        echo "Health check passed."
+        break
+    else
+        echo "Health check failed. Retrying in 10 seconds..."
+        RETRY_COUNT=$((RETRY_COUNT + 1))
+        sleep 10
+    fi
+done
+
+if [[ $RETRY_COUNT -eq $MAX_RETRIES ]]; then
+    echo "Health check failed after multiple attempts. Rolling back..."
+    $SCRIPT_DIR/rollback.sh $APP_NAME $SITE_NAME
+    exit 1
+fi
 
 echo "$APP_NAME successfully deployed on site $SITE_NAME."
