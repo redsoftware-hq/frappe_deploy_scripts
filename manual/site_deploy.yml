@@ -1,4 +1,4 @@
-name: Deploy Frappe App
+name: Deploy Frappe Apps
 
 on:
   workflow_dispatch:
@@ -14,8 +14,8 @@ on:
         description: 'Commit ID (optional, for rollback or specific deployment)'
         required: false
       site_name:
-        description: 'Site to deploy (Optional, defaults to secrets)'
-        required: false
+        description: 'Site to deploy (Required)'
+        required: true  # Now, site_name is mandatory
 
 jobs:
   deploy:
@@ -25,24 +25,6 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Validate Branch & App Selection
-      run: |
-        echo "Checking available branches..."
-        BRANCHES=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-        "https://api.github.com/repos/${{ github.repository }}/branches" | jq -r '.[].name')
-
-        echo "Available branches: $BRANCHES"
-        if [[ ! " ${BRANCHES[@]} " =~ " ${{ inputs.branch }} " ]]; then
-          echo "Error: Selected branch '${{ inputs.branch }}' does not exist."
-          exit 1
-        fi
-
-        SITE_NAME="${{ inputs.site_name }}"
-        if [ -z "$SITE_NAME" ]; then
-          SITE_NAME="${{ secrets.DEFAULT_SITE }}"
-        fi
-        echo "Deploying app: ${{ inputs.app_name }} on site: $SITE_NAME"
-
     - name: Deploy to Server
       uses: appleboy/ssh-action@v1.0.3
       with:
@@ -51,4 +33,19 @@ jobs:
         key: ${{ secrets.SSH_KEY }}
         script: |
           cd /home/frappe/ci_cd
-          ./deploy.sh ${{ inputs.app_name }} ${{ inputs.branch }} ${{ inputs.commit_id }} $SITE_NAME
+          ./deploy.sh ${{ inputs.app_name }} ${{ inputs.branch }} ${{ inputs.commit_id }} ${{ inputs.site_name }}
+
+    - name: Post-Deployment Health Check (Frappe API)
+      run: |
+        sleep 10  # Wait for the server to restart
+        FRAPPE_URL="https://${{ inputs.site_name }}/api/method/frappe.handler.ping"
+        echo "Checking Frappe site health after deployment at: $FRAPPE_URL"
+
+        RESPONSE=$(curl -s "$FRAPPE_URL")
+        echo "Response: $RESPONSE"
+
+        if [[ "$RESPONSE" != "\"pong\"" ]]; then
+          echo "Deployment failed! Site is unhealthy."
+          exit 1
+        fi
+        echo "Deployment successful. Site is running fine."
